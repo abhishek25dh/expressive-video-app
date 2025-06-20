@@ -276,41 +276,75 @@ const App: React.FC = () => {
     setCurrentUserInputUrl("");
   };
 
-  const getVisualSuggestionForSentence = async (sentence: string, ai: GoogleGenAI): Promise<string | null> => {
+   const getVisualSuggestionForSentence = async (sentence: string, ai: GoogleGenAI): Promise<string | null> => {
     if (!sentence.trim() || !apiKeyExists || !ai) return null;
     try {
-      const prompt = `Analyze this sentence: '${sentence}'. Identify the most prominent visual keyword or short phrase (2-3 words max) suitable for an image search on a site like Pixabay. Focus on concrete nouns or distinct concepts. If the sentence is too abstract or no clear visual emerges, return null. Respond ONLY with a JSON object containing a single key "suggestion", whose value is either the identified string or null.`;
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-preview-04-17', contents: prompt, config: { responseMimeType: "application/json" },
-      });
-      let jsonStr = response.text.trim();
-      const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-      const match = jsonStr.match(fenceRegex);
-      if (match && match[2]) jsonStr = match[2].trim();
-      const parsedData = JSON.parse(jsonStr);
-      return parsedData.suggestion || null;
-    } catch (error) { console.error(`Gemini suggestion error:`, error); return null; }
-  };
+      // --- IMPROVED PROMPT ---
+      const prompt = `You are an expert stock photo curator. For the given sentence, suggest a general, searchable keyword or short phrase (1-3 words) that would find a relevant background image on a site like Pixabay.
+- Prioritize common, concrete subjects (e.g., "city street", "mountain", "typing on keyboard").
+- Avoid overly specific, niche, or abstract ideas.
+- Think about what a photographer would tag their image with.
+- If no good visual concept exists, return null.
 
-  const fetchImageFromPixabay = async (query: string, apiKey: string): Promise<string | null> => {
-    if (!query || !apiKey) return null;
-    const url = `https://pixabay.com/api/?key=${apiKey}&q=${encodeURIComponent(query)}&image_type=photo&safesearch=true&per_page=5&orientation=horizontal`;
-    try {
-      const response = await fetch(url);
-      if (!response.ok) { console.error(`Pixabay API error: ${response.status}`); return null; }
-      const data = await response.json();
-      if (data.hits && data.hits.length > 0) return data.hits[0].webformatURL;
-      const wordsInQuery = query.split(/\s+/);
-      if (wordsInQuery.length > 1) {
-        const firstWordUrl = `https://pixabay.com/api/?key=${apiKey}&q=${encodeURIComponent(wordsInQuery[0])}&image_type=photo&safesearch=true&per_page=3&orientation=horizontal`;
-        const firstWordResponse = await fetch(firstWordUrl);
-        if (firstWordResponse.ok) {
-            const firstWordData = await firstWordResponse.json();
-            if (firstWordData.hits && firstWordData.hits.length > 0) return firstWordData.hits[0].webformatURL;
-        }
-      }
+Example:
+Sentence: "Getting stuck behind someone walking incredibly slowly isn't just an annoyance."
+Good Suggestion: "people walking" or "crowded street"
+Bad Suggestion: "slow walker" or "annoyance"
+
+Sentence to analyze: '${sentence}'
+
+Respond ONLY with a JSON object containing a single key "suggestion", whose value is the string you suggest or null.`;
+      // --- END OF IMPROVED PROMPT ---
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-1.5-flash-latest', // Using latest flash model is often a good practice
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      });
+
+      // The Gemini API with JSON output mode often returns the raw JSON string directly.
+      const jsonStr = response.response.text();
+      const parsedData = JSON.parse(jsonStr);
+
+      return parsedData.suggestion || null;
+    } catch (error) {
+      console.error(`Gemini suggestion error:`, error);
       return null;
-    } catch (error) { console.error(`Pixabay fetch error:`, error); return null; }
+    }
+  };
+    const fetchImageFromPixabay = async (query: string, apiKey: string): Promise<string | null> => {
+    if (!query || !apiKey) return null;
+
+    const performSearch = async (searchTerm: string) => {
+      const url = `https://pixabay.com/api/?key=${apiKey}&q=${encodeURIComponent(searchTerm)}&image_type=photo&safesearch=true&per_page=5&orientation=horizontal`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.error(`Pixabay API error for term "${searchTerm}": ${response.status}`);
+          return null;
+        }
+        const data = await response.json();
+        return (data.hits && data.hits.length > 0) ? data.hits[0].webformatURL : null;
+      } catch (error) {
+        console.error(`Pixabay fetch error for term "${searchTerm}":`, error);
+        return null;
+      }
+    };
+
+    // 1. Try the full query first
+    let imageUrl = await performSearch(query);
+    if (imageUrl) return imageUrl;
+
+    // 2. If it fails, try the LAST word of the query (often the main noun)
+    const wordsInQuery = query.trim().split(/\s+/);
+    if (wordsInQuery.length > 1) {
+      console.log(`Pixabay: Full query "${query}" failed. Trying last word: "${wordsInQuery[wordsInQuery.length - 1]}"`);
+      imageUrl = await performSearch(wordsInQuery[wordsInQuery.length - 1]);
+      if (imageUrl) return imageUrl;
+    }
+
+    // 3. If all else fails, return null
+    return null;
   };
   
   const segmentTranscriptToSentences = (assemblyWords: AssemblyAIWord[]): ScriptSegment[] => {
